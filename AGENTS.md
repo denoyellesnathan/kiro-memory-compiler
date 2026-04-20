@@ -290,8 +290,9 @@ Output: a markdown report with severity levels (error, warning, suggestion).
 
 ```
 llm-personal-kb/
-|-- .claude/
-|   |-- settings.json                # Hook configuration (auto-activates in Claude Code)
+|-- .kiro/
+|   |-- agents/
+|       |-- memory-compiler.json     # Agent config with hooks (activates via --agent)
 |-- .gitignore                       # Excludes runtime state, temp files, caches
 |-- AGENTS.md                        # This file - schema + full technical reference
 |-- README.md                        # Concise overview + quick start
@@ -303,17 +304,16 @@ llm-personal-kb/
 |   |-- concepts/                    #   Atomic knowledge articles
 |   |-- connections/                 #   Cross-cutting insights linking 2+ concepts
 |   |-- qa/                          #   Filed query answers (compounding knowledge)
-|-- scripts/                         # CLI tools
+|-- scripts/                         # CLI tools (invoke kiro-cli headless)
 |   |-- compile.py                   #   Compile daily logs -> knowledge articles
 |   |-- query.py                     #   Ask questions (index-guided, no RAG)
 |   |-- lint.py                      #   7 health checks
 |   |-- flush.py                     #   Extract memories from conversations (background)
 |   |-- config.py                    #   Path constants
 |   |-- utils.py                     #   Shared helpers
-|-- hooks/                           # Claude Code hooks
-|   |-- session-start.py             #   Injects knowledge into every session
-|   |-- session-end.py               #   Extracts conversation -> daily log
-|   |-- pre-compact.py               #   Safety net: captures context before compaction
+|-- hooks/                           # Kiro CLI hooks
+|   |-- agent-spawn.py               #   Injects knowledge into every session
+|   |-- stop.py                      #   Captures context after each turn -> flush
 |-- reports/                         # Lint reports (gitignored)
 ```
 
@@ -321,75 +321,64 @@ llm-personal-kb/
 
 ## Hook System (Automatic Capture)
 
-Hooks are configured in `.claude/settings.json` and fire automatically when you use Claude Code in this project.
+Hooks are configured in `.kiro/agents/memory-compiler.json` and fire automatically when you use Kiro CLI with the `--agent memory-compiler` flag.
 
-### `.claude/settings.json` Format
+### `.kiro/agents/memory-compiler.json` Format
 
 ```json
 {
+  "name": "memory-compiler",
+  "description": "Personal knowledge base compiler",
+  "instructions": ["..."],
   "hooks": {
-    "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run python hooks/session-start.py", "timeout": 15 }] }],
-    "PreCompact": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run python hooks/pre-compact.py", "timeout": 10 }] }],
-    "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": "uv run python hooks/session-end.py", "timeout": 10 }] }]
+    "agentSpawn": [{ "command": "python hooks/agent-spawn.py", "timeout_ms": 5000 }],
+    "stop": [{ "command": "python hooks/stop.py", "timeout_ms": 10000 }]
   }
 }
 ```
 
-Commands use simple relative paths from the project root. Empty `matcher` catches all events.
-
 ### Hook Details
 
-**`session-start.py`** (SessionStart)
+**`agent-spawn.py`** (agentSpawn)
 - Pure local I/O, no API calls, runs in under 1 second
 - Reads `knowledge/index.md` and the most recent daily log
-- Outputs JSON to stdout: `{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}`
-- Claude sees the knowledge base index at the start of every session
+- Outputs plain text to STDOUT — Kiro adds this directly to agent context
 - Max context: 20,000 characters
 
-**`session-end.py`** (SessionEnd)
-- Reads hook input from stdin (JSON with `session_id`, `transcript_path`, `cwd`)
-- Copies the raw JSONL transcript to a temp file (no parsing in the hook - keeps it fast)
-- Spawns `flush.py` as a fully detached background process
-- Recursion guard: exits immediately if `CLAUDE_INVOKED_BY` env var is set
-
-**`pre-compact.py`** (PreCompact)
-- Same architecture as session-end.py
-- Fires before Claude Code auto-compacts the context window
-- Guards against empty `transcript_path` (known Claude Code bug #13668)
-- Critical for long sessions: captures context before summarization discards it
-
-**Why both PreCompact and SessionEnd?** Long-running sessions may trigger multiple auto-compactions before you close the session. Without PreCompact, intermediate context is lost to summarization before SessionEnd ever fires.
+**`stop.py`** (stop)
+- Fires after every assistant response (each turn)
+- Reads `assistant_response` from the hook event JSON on stdin
+- Accumulates context across turns in `scripts/stop-hook-state.json`
+- Every 5 minutes (if enough content has accumulated), spawns `flush.py` as a background process
+- This replaces both SessionEnd and PreCompact from Claude Code — incremental capture means no data loss
 
 ### Background Flush Process (`flush.py`)
 
-Spawned by both hooks as a fully detached background process:
+Spawned by the stop hook as a fully detached background process:
 - **Windows:** `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` flags
 - **Mac/Linux:** `start_new_session=True`
 
-This ensures flush.py survives after Claude Code's hook process exits.
-
 **What flush.py does:**
-1. Sets `CLAUDE_INVOKED_BY=memory_flush` env var (prevents recursive hook firing)
-2. Reads the pre-extracted conversation context from the temp `.md` file
-3. Skips if context is empty or if same session was flushed within 60 seconds (deduplication)
-4. Calls Claude Agent SDK (`query()` with `allowed_tools=[]`, `max_turns=2`)
-5. Claude decides what's worth saving - returns structured bullet points or `FLUSH_OK`
-6. Appends result to `daily/YYYY-MM-DD.md`
-7. Cleans up temp context file
-8. **End-of-day auto-compilation:** If it's past 6 PM local time (`COMPILE_AFTER_HOUR = 18`) and today's daily log has changed since its last compilation (hash comparison against `state.json`), spawns `compile.py` as another detached background process. This means compilation happens automatically once a day without needing a cron job or manual trigger.
+1. Reads the accumulated conversation context from the temp `.md` file
+2. Skips if context is empty or if same session was flushed within 60 seconds (deduplication)
+3. Calls `kiro-cli chat --no-interactive` with the context as prompt (no tools needed)
+4. Kiro decides what's worth saving — returns structured bullet points or `FLUSH_OK`
+5. Appends result to `daily/YYYY-MM-DD.md`
+6. Cleans up temp context file
+7. **End-of-day auto-compilation:** If it's past 6 PM local time and today's daily log has changed since its last compilation, spawns `compile.py` as another detached background process.
 
-### JSONL Transcript Format
+### Kiro JSONL Session Format
 
-Claude Code stores conversations as `.jsonl` files. Messages are nested under a `message` key:
+Kiro CLI stores sessions at `~/.kiro/sessions/cli/{uuid}.jsonl`. Messages use this format:
 
 ```python
 entry = json.loads(line)
-msg = entry.get("message", {})
-role = msg.get("role", "")     # "user" or "assistant"
-content = msg.get("content", "")  # string or list of content blocks
+kind = entry.get("kind", "")       # "Prompt", "AssistantMessage", or "ToolResults"
+data = entry.get("data", {})
+content = data.get("content", [])   # list of {"kind": "text", "data": "..."} blocks
 ```
 
-Content can be a string or a list of blocks (`{"type": "text", "text": "..."}` dicts).
+The stop hook doesn't need to parse session files — it receives `assistant_response` directly in the hook event JSON.
 
 ---
 
@@ -397,26 +386,18 @@ Content can be a string or a list of blocks (`{"type": "text", "text": "..."}` d
 
 ### compile.py - The Compiler
 
-Uses the Claude Agent SDK's async streaming `query()`:
+Uses `kiro-cli chat --no-interactive` with full tool trust:
 
-```python
-async for message in query(
-    prompt=compile_prompt,
-    options=ClaudeAgentOptions(
-        cwd=str(ROOT_DIR),
-        system_prompt={"type": "preset", "preset": "claude_code"},
-        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
-        permission_mode="acceptEdits",
-        max_turns=30,
-    ),
-):
+```bash
+kiro-cli chat --no-interactive --trust-all-tools --agent memory-compiler \
+  "Compile this daily log into knowledge articles..."
 ```
 
-- Builds a prompt with: AGENTS.md schema, current index, all existing articles, and the daily log
-- Claude reads the daily log, decides what concepts to extract, and writes files directly
-- `permission_mode="acceptEdits"` auto-approves all file operations
+- Builds a prompt with: current index, all existing articles, and the daily log
+- Kiro reads the daily log, decides what concepts to extract, and writes files directly
+- `--trust-all-tools` auto-approves all file operations
+- `--agent memory-compiler` loads the agent config with AGENTS.md schema in instructions
 - Incremental: tracks SHA-256 hashes of daily logs in `state.json`, skips unchanged files
-- Cost: ~$0.45-0.65 per daily log (increases as KB grows)
 
 **CLI:**
 ```bash
@@ -428,7 +409,7 @@ uv run python scripts/compile.py --dry-run
 
 ### query.py - Index-Guided Retrieval
 
-Loads the entire knowledge base into context (index + all articles). No RAG.
+Loads the entire knowledge base into the prompt (index + all articles). No RAG.
 
 At personal KB scale (50-500 articles), the LLM reading a structured index outperforms vector similarity. The LLM understands what you're really asking; cosine similarity just finds similar words.
 
@@ -454,6 +435,8 @@ Seven checks:
 | Sparse articles | Structural | Under 200 words |
 | Contradictions | LLM | Conflicting claims across articles |
 
+The contradiction check uses `kiro-cli chat --no-interactive` (no tools needed).
+
 **CLI:**
 ```bash
 uv run python scripts/lint.py                    # all checks
@@ -467,39 +450,41 @@ Reports saved to `reports/lint-YYYY-MM-DD.md`.
 ## State Tracking
 
 `scripts/state.json` tracks:
-- `ingested` - map of daily log filenames to SHA-256 hashes, compilation timestamps, and costs
+- `ingested` - map of daily log filenames to SHA-256 hashes and compilation timestamps
 - `query_count` - total queries run
 - `last_lint` - timestamp of most recent lint
-- `total_cost` - cumulative API cost
 
 `scripts/last-flush.json` tracks flush deduplication (session_id + timestamp).
 
-Both are gitignored and regenerated automatically.
+`scripts/stop-hook-state.json` tracks accumulated context between stop hook invocations.
+
+All are gitignored and regenerated automatically.
 
 ---
 
 ## Dependencies
 
 `pyproject.toml` (at project root):
-- `claude-agent-sdk>=0.1.29` - Claude Agent SDK for LLM calls with tool use
 - `python-dotenv>=1.0.0` - Environment variable management
 - `tzdata>=2024.1` - Timezone data
 - Python 3.12+, managed by [uv](https://docs.astral.sh/uv/)
 
-No API key needed - uses Claude Code's built-in credentials at `~/.claude/.credentials.json`.
+**External requirement:** [Kiro CLI](https://kiro.dev/cli/) must be installed and authenticated (`KIRO_API_KEY` env var for headless mode, or interactive login for manual use).
 
 ---
 
 ## Costs
 
-| Operation | Cost |
-|-----------|------|
-| Compile one daily log | $0.45-0.65 |
-| Query (no file-back) | ~$0.15-0.25 |
-| Query (with file-back) | ~$0.25-0.40 |
-| Full lint (with contradictions) | ~$0.15-0.25 |
-| Structural lint only | $0.00 |
-| Memory flush (per session) | ~$0.02-0.05 |
+All operations use Kiro CLI headless mode, which requires a Kiro Pro, Pro+, or Power subscription with an API key. Operations consume credits from your subscription:
+
+| Operation | Approximate Credits |
+|-----------|-------------------|
+| Compile one daily log | ~0.5-1.0 |
+| Query (no file-back) | ~0.2-0.4 |
+| Query (with file-back) | ~0.3-0.5 |
+| Full lint (with contradictions) | ~0.2-0.3 |
+| Structural lint only | 0 (no LLM) |
+| Memory flush (per trigger) | ~0.1-0.2 |
 
 ---
 

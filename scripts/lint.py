@@ -6,13 +6,13 @@ contradictions (LLM), missing backlinks, and sparse articles.
 
 Usage:
     uv run python lint.py                    # all checks
-    uv run python lint.py --structural-only  # skip LLM checks (faster, cheaper)
+    uv run python lint.py --structural-only  # skip LLM checks (free)
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
+import subprocess
 from pathlib import Path
 
 from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
@@ -26,6 +26,7 @@ from utils import (
     load_state,
     read_all_wiki_content,
     save_state,
+    strip_ansi,
     wiki_article_exists,
 )
 
@@ -33,14 +34,13 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 def check_broken_links() -> list[dict]:
-    """Check for [[wikilinks]] that point to non-existent articles."""
     issues = []
     for article in list_wiki_articles():
         content = article.read_text(encoding="utf-8")
         rel = article.relative_to(KNOWLEDGE_DIR)
         for link in extract_wikilinks(content):
             if link.startswith("daily/"):
-                continue  # daily log references are valid
+                continue
             if not wiki_article_exists(link):
                 issues.append({
                     "severity": "error",
@@ -52,13 +52,11 @@ def check_broken_links() -> list[dict]:
 
 
 def check_orphan_pages() -> list[dict]:
-    """Check for articles with zero inbound links."""
     issues = []
     for article in list_wiki_articles():
         rel = article.relative_to(KNOWLEDGE_DIR)
         link_target = str(rel).replace(".md", "").replace("\\", "/")
-        inbound = count_inbound_links(link_target)
-        if inbound == 0:
+        if count_inbound_links(link_target) == 0:
             issues.append({
                 "severity": "warning",
                 "check": "orphan_page",
@@ -69,49 +67,37 @@ def check_orphan_pages() -> list[dict]:
 
 
 def check_orphan_sources() -> list[dict]:
-    """Check for daily logs that haven't been compiled yet."""
     state = load_state()
     ingested = state.get("ingested", {})
-    issues = []
-    for log_path in list_raw_files():
-        if log_path.name not in ingested:
-            issues.append({
-                "severity": "warning",
-                "check": "orphan_source",
-                "file": f"daily/{log_path.name}",
-                "detail": f"Uncompiled daily log: {log_path.name} has not been ingested",
-            })
-    return issues
+    return [
+        {"severity": "warning", "check": "orphan_source", "file": f"daily/{log_path.name}",
+         "detail": f"Uncompiled daily log: {log_path.name} has not been ingested"}
+        for log_path in list_raw_files() if log_path.name not in ingested
+    ]
 
 
 def check_stale_articles() -> list[dict]:
-    """Check if source daily logs have changed since compilation."""
     state = load_state()
     ingested = state.get("ingested", {})
     issues = []
     for log_path in list_raw_files():
         rel = log_path.name
-        if rel in ingested:
-            stored_hash = ingested[rel].get("hash", "")
-            current_hash = file_hash(log_path)
-            if stored_hash != current_hash:
-                issues.append({
-                    "severity": "warning",
-                    "check": "stale_article",
-                    "file": f"daily/{rel}",
-                    "detail": f"Stale: {rel} has changed since last compilation",
-                })
+        if rel in ingested and ingested[rel].get("hash") != file_hash(log_path):
+            issues.append({
+                "severity": "warning",
+                "check": "stale_article",
+                "file": f"daily/{rel}",
+                "detail": f"Stale: {rel} has changed since last compilation",
+            })
     return issues
 
 
 def check_missing_backlinks() -> list[dict]:
-    """Check for asymmetric links: A links to B but B doesn't link to A."""
     issues = []
     for article in list_wiki_articles():
         content = article.read_text(encoding="utf-8")
         rel = article.relative_to(KNOWLEDGE_DIR)
         source_link = str(rel).replace(".md", "").replace("\\", "/")
-
         for link in extract_wikilinks(content):
             if link.startswith("daily/"):
                 continue
@@ -130,7 +116,6 @@ def check_missing_backlinks() -> list[dict]:
 
 
 def check_sparse_articles() -> list[dict]:
-    """Check for articles with fewer than 200 words."""
     issues = []
     for article in list_wiki_articles():
         word_count = get_article_word_count(article)
@@ -145,93 +130,54 @@ def check_sparse_articles() -> list[dict]:
     return issues
 
 
-async def check_contradictions() -> list[dict]:
-    """Use LLM to detect contradictions across articles."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
+def check_contradictions() -> list[dict]:
+    """Use kiro-cli headless to detect contradictions across articles."""
     wiki_content = read_all_wiki_content()
 
-    prompt = f"""Review this knowledge base for contradictions, inconsistencies, or
-conflicting claims across articles.
-
-## Knowledge Base
+    prompt = f"""Review this knowledge base for contradictions and conflicting claims.
 
 {wiki_content}
-
-## Instructions
-
-Look for:
-- Direct contradictions (article A says X, article B says not-X)
-- Inconsistent recommendations (different articles recommend conflicting approaches)
-- Outdated information that conflicts with newer entries
 
 For each issue found, output EXACTLY one line in this format:
 CONTRADICTION: [file1] vs [file2] - description of the conflict
 INCONSISTENCY: [file] - description of the inconsistency
 
-If no issues found, output exactly: NO_ISSUES
+If no issues found, output exactly: NO_ISSUES"""
 
-Do NOT output anything else - no preamble, no explanation, just the formatted lines."""
+    result = subprocess.run(
+        ["kiro-cli", "chat", "--no-interactive", prompt],
+        cwd=str(ROOT_DIR),
+        capture_output=True,
+        text=True,
+    )
 
-    response = ""
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT_DIR),
-                allowed_tools=[],
-                max_turns=2,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        response += block.text
-    except Exception as e:
-        return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"LLM check failed: {e}"}]
+    if result.returncode != 0:
+        return [{"severity": "error", "check": "contradiction", "file": "(system)",
+                 "detail": f"LLM check failed (exit {result.returncode}): {result.stderr[:200]}"}]
 
-    issues = []
-    if "NO_ISSUES" not in response:
-        for line in response.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("CONTRADICTION:") or line.startswith("INCONSISTENCY:"):
-                issues.append({
-                    "severity": "warning",
-                    "check": "contradiction",
-                    "file": "(cross-article)",
-                    "detail": line,
-                })
+    response = strip_ansi(result.stdout.strip())
+    if "NO_ISSUES" in response:
+        return []
 
-    return issues
+    return [
+        {"severity": "warning", "check": "contradiction", "file": "(cross-article)", "detail": line.strip()}
+        for line in response.split("\n")
+        if line.strip().startswith(("CONTRADICTION:", "INCONSISTENCY:"))
+    ]
 
 
 def generate_report(all_issues: list[dict]) -> str:
-    """Generate a markdown lint report."""
     errors = [i for i in all_issues if i["severity"] == "error"]
     warnings = [i for i in all_issues if i["severity"] == "warning"]
     suggestions = [i for i in all_issues if i["severity"] == "suggestion"]
 
     lines = [
-        f"# Lint Report - {today_iso()}",
-        "",
+        f"# Lint Report - {today_iso()}", "",
         f"**Total issues:** {len(all_issues)}",
-        f"- Errors: {len(errors)}",
-        f"- Warnings: {len(warnings)}",
-        f"- Suggestions: {len(suggestions)}",
-        "",
+        f"- Errors: {len(errors)}", f"- Warnings: {len(warnings)}", f"- Suggestions: {len(suggestions)}", "",
     ]
 
-    for severity, issues, marker in [
-        ("Errors", errors, "x"),
-        ("Warnings", warnings, "!"),
-        ("Suggestions", suggestions, "?"),
-    ]:
+    for severity, issues, marker in [("Errors", errors, "x"), ("Warnings", warnings, "!"), ("Suggestions", suggestions, "?")]:
         if issues:
             lines.append(f"## {severity}")
             lines.append("")
@@ -241,25 +187,19 @@ def generate_report(all_issues: list[dict]) -> str:
             lines.append("")
 
     if not all_issues:
-        lines.append("All checks passed. Knowledge base is healthy.")
-        lines.append("")
+        lines.extend(["All checks passed. Knowledge base is healthy.", ""])
 
     return "\n".join(lines)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Lint the knowledge base")
-    parser.add_argument(
-        "--structural-only",
-        action="store_true",
-        help="Skip LLM-based checks (contradictions) - faster and free",
-    )
+    parser.add_argument("--structural-only", action="store_true", help="Skip LLM-based checks")
     args = parser.parse_args()
 
     print("Running knowledge base lint checks...")
     all_issues: list[dict] = []
 
-    # Structural checks (free, instant)
     checks = [
         ("Broken links", check_broken_links),
         ("Orphan pages", check_orphan_pages),
@@ -275,28 +215,24 @@ def main():
         all_issues.extend(issues)
         print(f"    Found {len(issues)} issue(s)")
 
-    # LLM check (costs money)
     if not args.structural_only:
         print("  Checking: Contradictions (LLM)...")
-        issues = asyncio.run(check_contradictions())
+        issues = check_contradictions()
         all_issues.extend(issues)
         print(f"    Found {len(issues)} issue(s)")
     else:
         print("  Skipping: Contradictions (--structural-only)")
 
-    # Generate and save report
     report = generate_report(all_issues)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     report_path = REPORTS_DIR / f"lint-{today_iso()}.md"
     report_path.write_text(report, encoding="utf-8")
     print(f"\nReport saved to: {report_path}")
 
-    # Update state
     state = load_state()
     state["last_lint"] = now_iso()
     save_state(state)
 
-    # Summary
     errors = sum(1 for i in all_issues if i["severity"] == "error")
     warnings = sum(1 for i in all_issues if i["severity"] == "warning")
     suggestions = sum(1 for i in all_issues if i["severity"] == "suggestion")

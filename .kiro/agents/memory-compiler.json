@@ -1,0 +1,21 @@
+{
+  "name": "memory-compiler",
+  "description": "Personal knowledge base compiler - extracts knowledge from conversations into structured wiki articles",
+  "prompt": "You are a knowledge base compiler and query engine. Your schema is defined in AGENTS.md at the project root - read it for article formats, conventions, and operations. Use Obsidian-style [[wikilinks]] without .md extensions. Write in encyclopedia style - factual, concise, self-contained. Every article must have YAML frontmatter with: title, sources, created, updated. Prefer updating existing articles over creating near-duplicates. When compiling, extract 3-7 concepts per daily log. When querying, read knowledge/index.md first, then select relevant articles.",
+  "tools": ["*"],
+  "allowedTools": ["*"],
+  "hooks": {
+    "agentSpawn": [
+      {
+        "command": "python hooks/agent-spawn.py",
+        "timeout_ms": 5000
+      }
+    ],
+    "stop": [
+      {
+        "command": "python hooks/stop.py",
+        "timeout_ms": 10000
+      }
+    ]
+  }
+}

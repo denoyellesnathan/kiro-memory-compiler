@@ -1,9 +1,8 @@
 """
-Memory flush agent - extracts important knowledge from conversation context.
+Memory flush - extracts important knowledge from conversation context.
 
-Spawned by session-end.py or pre-compact.py as a background process. Reads
-pre-extracted conversation context from a .md file, uses the Claude Agent SDK
-to decide what's worth saving, and appends the result to today's daily log.
+Spawned by the stop hook as a background process. Reads conversation context,
+uses kiro-cli headless to decide what's worth saving, and appends to today's daily log.
 
 Usage:
     uv run python flush.py <context_file.md> <session_id>
@@ -11,27 +10,22 @@ Usage:
 
 from __future__ import annotations
 
-# Recursion prevention: set this BEFORE any imports that might trigger Claude
-import os
-os.environ["CLAUDE_INVOKED_BY"] = "memory_flush"
-
-import asyncio
 import json
 import logging
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+from utils import strip_ansi
 DAILY_DIR = ROOT / "daily"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
-# Set up file-based logging so we can verify the background process ran.
-# The parent process sends stdout/stderr to DEVNULL (to avoid the inherited
-# file handle bug on Windows), so this is our only observability channel.
 logging.basicConfig(
     filename=str(LOG_FILE),
     level=logging.INFO,
@@ -72,21 +66,12 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
         f.write(entry)
 
 
-async def run_flush(context: str) -> str:
-    """Use Claude Agent SDK to extract important knowledge from conversation context."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
+def run_flush(context: str) -> str:
+    """Use kiro-cli headless to extract knowledge from conversation context."""
     prompt = f"""Review the conversation context below and respond with a concise summary
-of important items that should be preserved in the daily log.
-Do NOT use any tools — just return plain text.
+of important items to preserve in a daily log.
 
-Format your response as a structured daily log entry with these sections:
+Format as:
 
 **Context:** [One line about what the user was working on]
 
@@ -102,55 +87,34 @@ Format your response as a structured daily log entry with these sections:
 **Action Items:**
 - [Follow-ups or TODOs mentioned]
 
-Skip anything that is:
-- Routine tool calls or file reads
-- Content that's trivial or obvious
-- Trivial back-and-forth or clarification exchanges
-
-Only include sections that have actual content. If nothing is worth saving,
-respond with exactly: FLUSH_OK
+Only include sections with actual content. If nothing is worth saving, respond with exactly: FLUSH_OK
 
 ## Conversation Context
 
 {context}"""
 
-    response = ""
+    result = subprocess.run(
+        ["kiro-cli", "chat", "--no-interactive", prompt],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+    )
 
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT),
-                allowed_tools=[],
-                max_turns=2,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        response += block.text
-            elif isinstance(message, ResultMessage):
-                pass
-    except Exception as e:
-        import traceback
-        logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
-        response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
+    if result.returncode != 0:
+        return f"FLUSH_ERROR: kiro-cli exit {result.returncode}: {result.stderr[:200]}"
 
-    return response
+    return strip_ansi(result.stdout.strip())
 
 
-COMPILE_AFTER_HOUR = 18  # 6 PM local time
+COMPILE_AFTER_HOUR = 18
 
 
 def maybe_trigger_compilation() -> None:
-    """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
-    import subprocess as _sp
-
+    """If past compile hour and today's log hasn't been compiled, run compile.py."""
     now = datetime.now(timezone.utc).astimezone()
     if now.hour < COMPILE_AFTER_HOUR:
         return
 
-    # Check if today's log has already been compiled
     today_log = f"{now.strftime('%Y-%m-%d')}.md"
     compile_state_file = SCRIPTS_DIR / "state.json"
     if compile_state_file.exists():
@@ -158,13 +122,12 @@ def maybe_trigger_compilation() -> None:
             compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
             ingested = compile_state.get("ingested", {})
             if today_log in ingested:
-                # Already compiled today - check if the log has changed since
                 from hashlib import sha256
                 log_path = DAILY_DIR / today_log
                 if log_path.exists():
                     current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
                     if ingested[today_log].get("hash") == current_hash:
-                        return  # log unchanged since last compile
+                        return
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -175,16 +138,13 @@ def maybe_trigger_compilation() -> None:
     logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
 
     cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
-
-    kwargs: dict = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = _sp.CREATE_NEW_PROCESS_GROUP | _sp.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
+    kwargs: dict = {"start_new_session": True} if sys.platform != "win32" else {
+        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+    }
 
     try:
         log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
-        _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
+        subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, cwd=str(ROOT), **kwargs)
     except Exception as e:
         logging.error("Failed to spawn compile.py: %s", e)
 
@@ -197,23 +157,19 @@ def main():
     context_file = Path(sys.argv[1])
     session_id = sys.argv[2]
 
-    logging.info("flush.py started for session %s, context: %s", session_id, context_file)
+    logging.info("flush.py started for session %s", session_id)
 
     if not context_file.exists():
         logging.error("Context file not found: %s", context_file)
         return
 
-    # Deduplication: skip if same session was flushed within 60 seconds
+    # Deduplication
     state = load_flush_state()
-    if (
-        state.get("session_id") == session_id
-        and time.time() - state.get("timestamp", 0) < 60
-    ):
+    if state.get("session_id") == session_id and time.time() - state.get("timestamp", 0) < 60:
         logging.info("Skipping duplicate flush for session %s", session_id)
         context_file.unlink(missing_ok=True)
         return
 
-    # Read pre-extracted context
     context = context_file.read_text(encoding="utf-8").strip()
     if not context:
         logging.info("Context file is empty, skipping")
@@ -222,32 +178,25 @@ def main():
 
     logging.info("Flushing session %s: %d chars", session_id, len(context))
 
-    # Run the LLM extraction
-    response = asyncio.run(run_flush(context))
+    response = run_flush(context)
 
-    # Append to daily log
-    if "FLUSH_OK" in response:
+    cleaned = response.strip()
+    if cleaned.startswith("FLUSH_OK"):
+        cleaned = cleaned[len("FLUSH_OK"):].strip()
+
+    if not cleaned:
         logging.info("Result: FLUSH_OK")
-        append_to_daily_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
-        )
+        append_to_daily_log("FLUSH_OK - Nothing worth saving from this session", "Memory Flush")
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
         append_to_daily_log(response, "Memory Flush")
     else:
-        logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_daily_log(response, "Session")
+        logging.info("Result: saved to daily log (%d chars)", len(cleaned))
+        append_to_daily_log(cleaned, "Session")
 
-    # Update dedup state
     save_flush_state({"session_id": session_id, "timestamp": time.time()})
-
-    # Clean up context file
     context_file.unlink(missing_ok=True)
-
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
     maybe_trigger_compilation()
-
     logging.info("Flush complete for session %s", session_id)
 
 
