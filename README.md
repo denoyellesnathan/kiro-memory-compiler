@@ -53,6 +53,19 @@ uv run python scripts/lint.py                        # run health checks
 uv run python scripts/lint.py --structural-only      # free structural checks only
 ```
 
+## Deep Capture with @remember
+
+During any conversation with the memory-compiler agent, you can flag a topic for detailed knowledge extraction:
+
+```
+@remember kubernetes networking
+@capture the auth token refresh pattern we just discussed
+```
+
+The agent will read the current knowledge index, extract thorough knowledge from the conversation context — concepts, code patterns, decisions, gotchas, connections — and write it directly into `knowledge/` as concept, Q&A, and/or connection articles. The index and build log are updated automatically.
+
+This is useful when a conversation covers something you know you'll want to reference later and the normal background flush might not capture with enough depth.
+
 ## Requirements
 
 - [Kiro CLI](https://kiro.dev/cli/) installed and authenticated
