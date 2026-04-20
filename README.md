@@ -4,7 +4,7 @@
 
 This project is a [Kiro](https://kiro.dev/) adaptation of [cole-medin/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler) by [Cole Medin](https://github.com/coleam00), which was originally built for Claude Code. The core architecture — daily logs, an LLM compiler, and index-guided retrieval — comes from [Andrej Karpathy's LLM Knowledge Base](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) design.
 
-Instead of Claude Code hooks and the Claude Agent SDK, this version uses Kiro CLI's agent system (`kiro-cli chat --agent memory-compiler`) with `agentSpawn` and `stop` hooks to capture conversation context after each turn and periodically flush it to daily logs. The compilation, querying, and linting scripts have been adapted to use `kiro-cli chat --no-interactive` in place of the Claude Agent SDK.
+Instead of Claude Code hooks and the Claude Agent SDK, this version uses Kiro CLI's agent system with `agentSpawn` and `stop` hooks to capture conversation context after each turn and periodically flush it to daily logs. Setup installs a lightweight `memory-capture` agent as the global default, so every `kiro-cli chat` session gets knowledge capture automatically — no flags needed. The compilation, querying, and linting scripts have been adapted to use `kiro-cli chat --no-interactive` in place of the Claude Agent SDK.
 
 ## Quick Start
 
@@ -17,14 +17,14 @@ uv sync
 # 2. Set your Kiro API key (for headless mode)
 export KIRO_API_KEY="your-key-here"
 
-# 3. Run first-time setup (installs agent globally to ~/.kiro/agents/)
+# 3. Run first-time setup (installs agents globally, sets default)
 uv run python scripts/setup.py
 
 # 4. Use from any directory — hooks activate automatically
-kiro-cli chat --agent memory-compiler
+kiro-cli chat
 ```
 
-The hooks activate automatically when using the `memory-compiler` agent:
+The hooks activate automatically on every `kiro-cli chat` session (setup sets `memory-capture` as the default agent):
 - `agentSpawn` injects your knowledge base index into every session
 - `stop` captures context after each turn and periodically flushes to daily logs
 - After 6 PM, the next flush automatically triggers compilation
