@@ -38,7 +38,7 @@ def main():
         "prompt": "You are Kiro, an AI assistant. Help the user with whatever they need.",
         "tools": ["*"],
         "allowedTools": ["*"],
-        "resources": [f"file://{ROOT / 'knowledge' / 'index.md'}"],
+        "resources": [f"file://{ROOT / 'knowledge' / 'index.md'}", f"file://{ROOT / 'AGENTS.md'}"],
         "hooks": hooks,
     }
 
