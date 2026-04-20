@@ -89,11 +89,26 @@ Format:
 ```markdown
 # Knowledge Base Index
 
-| Article | Summary | Compiled From | Updated |
-|---------|---------|---------------|---------|
-| [[concepts/supabase-auth]] | Row-level security patterns and JWT gotchas | daily/2026-04-02.md | 2026-04-02 |
-| [[connections/auth-and-webhooks]] | Token verification patterns shared across Supabase auth and Stripe webhooks | daily/2026-04-02.md, daily/2026-04-04.md | 2026-04-04 |
+## Authentication & Security
+| Article | Tags | Summary | Compiled From | Updated |
+|---------|------|---------|---------------|---------|
+| [[concepts/supabase-auth]] | auth, supabase, rls | Row-level security patterns and JWT gotchas | daily/2026-04-02.md | 2026-04-02 |
+| [[connections/auth-and-webhooks]] | auth, webhooks, stripe | Token verification patterns shared across Supabase auth and Stripe webhooks | daily/2026-04-02.md, daily/2026-04-04.md | 2026-04-04 |
+
+## Infrastructure & CI/CD
+| Article | Tags | Summary | Compiled From | Updated |
+|---------|------|---------|---------------|---------|
+| [[concepts/nextjs-project-structure]] | nextjs, project-setup | ... | daily/2026-04-01.md | 2026-04-01 |
 ```
+
+Articles are grouped by domain. The compiler infers the domain from the article's tags:
+- Each `## Domain Name` section contains its own full table (with header row)
+- Domain names should be broad enough to hold 2-10 articles (e.g., "Logging & Debugging", "Infrastructure & CI/CD", "API Gateway")
+- If an article spans domains, list it in the primary one and add `(also: Other Domain)` after the summary
+- New domains are created organically as articles accumulate — don't pre-define empty sections
+- Within each domain, sort articles alphabetically by path
+
+The Tags column is populated from the article's frontmatter `tags` field (comma-separated). For connection articles that lack a `tags` field, derive tags from the connected concepts' tags. This column enables fast filtering during queries — the LLM can scan domain headers first, then tags, then summaries.
 
 ### `knowledge/log.md` - Build Log
 
@@ -238,7 +253,7 @@ When processing a daily log:
    - If an existing concept article covers this topic: UPDATE it with new information, add the daily log as a source
    - If it's a new topic: CREATE a new `concepts/` article
 5. If the log reveals a non-obvious connection between 2+ existing concepts: CREATE a `connections/` article
-6. UPDATE `knowledge/index.md` with new/modified entries
+6. UPDATE `knowledge/index.md` with new/modified entries — include the Tags column populated from the article's frontmatter `tags` field. Place each article under the appropriate `## Domain` section (infer domain from tags; create new domain sections as needed)
 7. APPEND to `knowledge/log.md`
 
 **Important guidelines:**
@@ -281,7 +296,7 @@ Output: a markdown report with severity levels (error, warning, suggestion).
 - **Writing style:** Encyclopedia-style, factual, third-person where appropriate
 - **Dates:** ISO 8601 (YYYY-MM-DD for dates, full ISO for timestamps in log.md)
 - **File naming:** lowercase, hyphens for spaces (e.g., `supabase-row-level-security.md`)
-- **Frontmatter:** Every article must have YAML frontmatter with at minimum: title, sources, created, updated
+- **Frontmatter:** Every article must have YAML frontmatter with at minimum: title, sources, created, updated. Q&A articles must also include `question` and `consulted` fields per the qa/ article format.
 - **Sources:** Always link back to the daily log(s) that contributed to an article
 
 ---
