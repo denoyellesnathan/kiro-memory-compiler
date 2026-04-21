@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import AGENTS_FILE, CONCEPTS_DIR, CONNECTIONS_DIR, DAILY_DIR, KNOWLEDGE_DIR, now_iso
+from config import DAILY_DIR, KNOWLEDGE_DIR, now_iso
 from utils import (
     file_hash,
     list_raw_files,
@@ -36,17 +36,6 @@ def compile_daily_log(log_path: Path, state: dict) -> None:
     log_content = log_path.read_text(encoding="utf-8")
     wiki_index = read_wiki_index()
 
-    # Build existing articles context
-    existing_articles_context = ""
-    existing = {}
-    for article_path in list_wiki_articles():
-        rel = article_path.relative_to(KNOWLEDGE_DIR)
-        existing[str(rel)] = article_path.read_text(encoding="utf-8")
-
-    if existing:
-        parts = [f"### {rel_path}\n```markdown\n{content}\n```" for rel_path, content in existing.items()]
-        existing_articles_context = "\n\n".join(parts)
-
     timestamp = now_iso()
 
     prompt = f"""Compile this daily log into knowledge articles.
@@ -55,9 +44,12 @@ def compile_daily_log(log_path: Path, state: dict) -> None:
 
 {wiki_index}
 
-## Existing Wiki Articles
+## Existing Articles Location
 
-{existing_articles_context if existing_articles_context else "(No existing articles yet)"}
+Articles live under `{KNOWLEDGE_DIR}` in subdirectories: `concepts/`, `connections/`, `qa/`.
+**Do NOT ask for the full articles upfront.** Instead, use the index above to identify which
+existing articles are relevant to this daily log, then read only those files before deciding
+whether to update them or create new ones.
 
 ## Daily Log to Compile
 
@@ -67,11 +59,12 @@ def compile_daily_log(log_path: Path, state: dict) -> None:
 
 ## Your Task
 
-1. Extract 3-7 key concepts into `knowledge/concepts/` articles
-2. Create connection articles in `knowledge/connections/` if non-obvious relationships exist
-3. Update existing articles if this log adds new information
-4. Update `knowledge/index.md` with new/modified entries
-5. Append to `knowledge/log.md`:
+1. Read the index above and identify existing articles that overlap with topics in this daily log
+2. Read only those relevant articles from disk (use their file paths under `{KNOWLEDGE_DIR}/`)
+3. Extract 3-7 key concepts into `knowledge/concepts/` articles (update existing or create new)
+4. Create connection articles in `knowledge/connections/` if non-obvious relationships exist
+5. Update `knowledge/index.md` with new/modified entries
+6. Append to `knowledge/log.md`:
    ## [{timestamp}] compile | {log_path.name}
    - Source: daily/{log_path.name}
    - Articles created: [[concepts/x]], [[concepts/y]]

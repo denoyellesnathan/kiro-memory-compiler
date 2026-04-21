@@ -15,14 +15,14 @@ import subprocess
 from pathlib import Path
 
 from config import KNOWLEDGE_DIR, QA_DIR, now_iso
-from utils import load_state, read_all_wiki_content, save_state, strip_ansi
+from utils import load_state, read_wiki_index, save_state, strip_ansi
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 def run_query(question: str, file_back: bool = False) -> str:
     """Query the knowledge base via kiro-cli headless."""
-    wiki_content = read_all_wiki_content()
+    wiki_index = read_wiki_index()
 
     file_back_instructions = ""
     if file_back:
@@ -40,16 +40,16 @@ After answering, do the following:
    - Filed to: [[qa/article-name]]
 """
 
-    prompt = f"""Answer this question using the knowledge base below.
+    prompt = f"""Answer this question using the knowledge base.
 
-1. Read the INDEX section first
-2. Identify relevant articles
+1. Read the INDEX below to identify relevant articles
+2. Read only the relevant article files from `{KNOWLEDGE_DIR}/` (concepts/, connections/, qa/)
 3. Synthesize a clear answer with [[wikilink]] citations
 4. If the KB doesn't cover this, say so honestly
 
-## Knowledge Base
+## Knowledge Base Index
 
-{wiki_content}
+{wiki_index}
 
 ## Question
 

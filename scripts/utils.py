@@ -18,7 +18,7 @@ from config import (
 
 # ── ANSI stripping ────────────────────────────────────────────────────
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 def strip_ansi(text: str) -> str:
@@ -77,7 +77,7 @@ def read_wiki_index() -> str:
     """Read the knowledge base index file."""
     if INDEX_FILE.exists():
         return INDEX_FILE.read_text(encoding="utf-8")
-    return "# Knowledge Base Index\n\n| Article | Summary | Compiled From | Updated |\n|---------|---------|---------------|---------|"
+    return "# Knowledge Base Index\n\n| Article | Tags | Summary | Compiled From | Updated |\n|---------|------|---------|---------------|---------|"
 
 
 def read_all_wiki_content() -> str:
