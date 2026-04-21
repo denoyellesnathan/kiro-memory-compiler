@@ -19,12 +19,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+from config import DAILY_DIR, SCRIPTS_DIR
 from utils import strip_ansi
-DAILY_DIR = ROOT / "daily"
-SCRIPTS_DIR = ROOT / "scripts"
+
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
+
+# Max context chars to send to the LLM (prevents runaway prompts)
+MAX_CONTEXT_CHARS = 80_000
+# Timeout for kiro-cli subprocess in seconds
+FLUSH_TIMEOUT_SECONDS = 120
 
 logging.basicConfig(
     filename=str(LOG_FILE),
@@ -60,7 +64,10 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
         )
 
     time_str = today.strftime("%H:%M")
-    entry = f"### {section} ({time_str})\n\n{content}\n\n"
+    # Ensure content ends with a newline so the next entry starts cleanly
+    if not content.endswith("\n"):
+        content += "\n"
+    entry = f"### {section} ({time_str})\n\n{content}\n"
 
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(entry)
@@ -100,60 +107,21 @@ Only include sections with actual content. If nothing is worth saving, respond w
 
 {context}"""
 
-    result = subprocess.run(
-        ["kiro-cli", "chat", "--no-interactive", prompt],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["kiro-cli", "chat", "--no-interactive", prompt],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=FLUSH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"FLUSH_ERROR: kiro-cli timed out after {FLUSH_TIMEOUT_SECONDS}s"
 
     if result.returncode != 0:
         return f"FLUSH_ERROR: kiro-cli exit {result.returncode}: {result.stderr[:200]}"
 
     return strip_ansi(result.stdout.strip())
-
-
-COMPILE_AFTER_HOUR = 18
-
-
-def maybe_trigger_compilation() -> None:
-    """If past compile hour and today's log hasn't been compiled, run compile.py."""
-    now = datetime.now(timezone.utc).astimezone()
-    if now.hour < COMPILE_AFTER_HOUR:
-        return
-
-    today_log = f"{now.strftime('%Y-%m-%d')}.md"
-    compile_state_file = SCRIPTS_DIR / "state.json"
-    if compile_state_file.exists():
-        try:
-            compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
-            ingested = compile_state.get("ingested", {})
-            if today_log in ingested:
-                from hashlib import sha256
-                log_path = DAILY_DIR / today_log
-                if log_path.exists():
-                    current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
-                    if ingested[today_log].get("hash") == current_hash:
-                        return
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    compile_script = SCRIPTS_DIR / "compile.py"
-    if not compile_script.exists():
-        return
-
-    logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
-
-    cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
-    kwargs: dict = {"start_new_session": True} if sys.platform != "win32" else {
-        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    }
-
-    try:
-        log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
-        subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, cwd=str(ROOT), **kwargs)
-    except Exception as e:
-        logging.error("Failed to spawn compile.py: %s", e)
 
 
 def main():
@@ -183,6 +151,12 @@ def main():
         context_file.unlink(missing_ok=True)
         return
 
+    if len(context) > MAX_CONTEXT_CHARS:
+        logging.warning(
+            "Context too large (%d chars), truncating to %d", len(context), MAX_CONTEXT_CHARS
+        )
+        context = context[:MAX_CONTEXT_CHARS]
+
     logging.info("Flushing session %s: %d chars", session_id, len(context))
 
     response = run_flush(context)
@@ -192,18 +166,15 @@ def main():
         cleaned = cleaned[len("FLUSH_OK"):].strip()
 
     if not cleaned:
-        logging.info("Result: FLUSH_OK")
-        append_to_daily_log("FLUSH_OK - Nothing worth saving from this session", "Memory Flush")
+        logging.info("Result: FLUSH_OK — nothing appended to daily log")
     elif "FLUSH_ERROR" in response:
         logging.error("Result: %s", response)
-        append_to_daily_log(response, "Memory Flush")
     else:
         logging.info("Result: saved to daily log (%d chars)", len(cleaned))
         append_to_daily_log(cleaned, "Session")
 
     save_flush_state({"session_id": session_id, "timestamp": time.time()})
     context_file.unlink(missing_ok=True)
-    maybe_trigger_compilation()
     logging.info("Flush complete for session %s", session_id)
 
 

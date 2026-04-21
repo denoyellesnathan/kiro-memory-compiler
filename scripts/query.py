@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 from config import KNOWLEDGE_DIR, QA_DIR, now_iso
-from utils import load_state, read_wiki_index, save_state, strip_ansi
+from utils import extract_wikilinks, load_state, read_wiki_index, record_article_access, save_state, strip_ansi
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -68,12 +68,22 @@ After answering, do the following:
     if result.returncode != 0:
         return f"Error querying knowledge base (exit {result.returncode}): {result.stderr[:500]}"
 
+    answer = strip_ansi(result.stdout)
+
+    # Record access for any articles referenced in the answer
+    consulted = [
+        link for link in extract_wikilinks(answer)
+        if not link.startswith("daily/") and "/" in link
+    ]
+    if consulted:
+        record_article_access(consulted)
+
     # Update state
     state = load_state()
     state["query_count"] = state.get("query_count", 0) + 1
     save_state(state)
 
-    return strip_ansi(result.stdout)
+    return answer
 
 
 def main():

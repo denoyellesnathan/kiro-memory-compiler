@@ -16,14 +16,14 @@ flowchart TD
         G --> H{Worth saving?}
         H -->|FLUSH_OK| I[Skip]
         H -->|Yes| J[Append to daily/YYYY-MM-DD.md]
-        J --> K{After 6 PM &<br/>log changed?}
-        K -->|No| L[Done]
-        K -->|Yes| M[Spawn compile.py]
+        J --> L[Done]
     end
 
-    subgraph COMPILE["Background: compile.py"]
-        M --> N[kiro-cli --no-interactive<br/>--trust-all-tools<br/>--agent memory-compiler]
-        N --> O[Read daily log + AGENTS.md schema]
+    subgraph COMPILE["Manual: compile.py"]
+        M[User runs compile.py] --> N[kiro-cli --no-interactive<br/>--trust-all-tools<br/>--agent memory-compiler]
+        N --> N2{Offset tracking:<br/>new content since<br/>last compile?}
+        N2 -->|No new content| N3[Skip]
+        N2 -->|Yes| O[Send only new portion<br/>of daily log + index]
         O --> P[Create/update concept articles]
         P --> Q[Create connection articles]
         Q --> R[Update index.md + log.md]
@@ -32,9 +32,20 @@ flowchart TD
     subgraph QUERY["On-demand: query.py"]
         S[User runs query.py 'question'] --> T[kiro-cli --no-interactive<br/>--agent memory-compiler]
         T --> U[Read index → select articles → synthesize answer]
-        U --> V{--file-back?}
+        U --> U2[Record access to access-log.json<br/>for consulted articles]
+        U2 --> V{--file-back?}
         V -->|Yes| W[Create qa/ article + update index]
         V -->|No| X[Print answer]
+    end
+
+    subgraph LINT["On-demand: lint.py (8 checks)"]
+        LA[uv run python lint.py] --> LB[Structural checks:<br/>broken links, orphans, stale,<br/>backlinks, sparse]
+        LB --> LC[Decay check:<br/>stale knowledge via access-log.json<br/>flags articles idle 90+ days]
+        LC --> LD{--structural-only?}
+        LD -->|No| LE[LLM check: contradictions]
+        LD -->|Yes| LF[Skip LLM]
+        LE --> LG[Save report to reports/]
+        LF --> LG
     end
 
     R -->|Next session| B

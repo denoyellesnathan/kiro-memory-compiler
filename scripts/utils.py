@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from config import (
+    ACCESS_LOG_FILE,
     CONCEPTS_DIR,
     CONNECTIONS_DIR,
     DAILY_DIR,
@@ -140,3 +141,92 @@ def build_index_entry(rel_path: str, summary: str, sources: str, updated: str) -
     """Build a single index table row."""
     link = rel_path.replace(".md", "")
     return f"| [[{link}]] | {summary} | {sources} | {updated} |"
+
+
+# ── Access tracking ───────────────────────────────────────────────────
+
+def load_access_log() -> dict:
+    """Load the article access log from access-log.json."""
+    if ACCESS_LOG_FILE.exists():
+        try:
+            return json.loads(ACCESS_LOG_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_access_log(log: dict) -> None:
+    """Save the article access log."""
+    ACCESS_LOG_FILE.write_text(json.dumps(log, indent=2), encoding="utf-8")
+
+
+def record_article_access(article_keys: list[str]) -> None:
+    """Record access timestamps for a list of article keys (relative paths without .md).
+
+    article_keys: e.g. ["concepts/supabase-auth", "connections/auth-and-webhooks"]
+    """
+    from config import now_iso
+    log = load_access_log()
+    timestamp = now_iso()
+    for key in article_keys:
+        normalized = key.replace("\\", "/").removesuffix(".md")
+        entry = log.get(normalized, {"access_count": 0})
+        entry["last_accessed"] = timestamp
+        entry["access_count"] = entry.get("access_count", 0) + 1
+        log[normalized] = entry
+    save_access_log(log)
+
+
+def get_last_activity(article_path: Path) -> str | None:
+    """Return the most recent date an article was accessed or updated.
+
+    Checks three sources (most recent wins):
+    1. Filesystem atime — catches reads from any source (kiro-cli tools, Obsidian, etc.)
+    2. Access log — explicit query.py access tracking with counts
+    3. Frontmatter 'updated' field — set by the compiler
+
+    Returns an ISO date string or None if no activity is recorded.
+    """
+    from datetime import datetime, timezone
+
+    dates: list[str] = []
+
+    # 1. Filesystem atime (most comprehensive — any read updates this)
+    try:
+        stat = article_path.stat()
+        atime = max(stat.st_atime, stat.st_mtime)
+        atime_str = datetime.fromtimestamp(atime, tz=timezone.utc).astimezone().strftime("%Y-%m-%d")
+        dates.append(atime_str)
+    except OSError:
+        pass
+
+    # 2. Access log (query.py explicit tracking)
+    rel = str(article_path.relative_to(KNOWLEDGE_DIR)).replace("\\", "/").removesuffix(".md")
+    log = load_access_log()
+    last_accessed = log.get(rel, {}).get("last_accessed")
+    if last_accessed:
+        dates.append(last_accessed[:10])
+
+    # 3. Frontmatter 'updated' field
+    last_updated = _extract_frontmatter_date(article_path, "updated")
+    if last_updated:
+        dates.append(last_updated[:10])
+
+    if not dates:
+        return None
+    return max(dates)
+
+
+def _extract_frontmatter_date(path: Path, field: str) -> str | None:
+    """Extract a date field from YAML frontmatter (simple regex, no yaml dependency)."""
+    content = path.read_text(encoding="utf-8")
+    if not content.startswith("---"):
+        return None
+    end = content.find("---", 3)
+    if end == -1:
+        return None
+    frontmatter = content[3:end]
+    match = re.search(rf"^{re.escape(field)}:\s*(.+)$", frontmatter, re.MULTILINE)
+    if match:
+        return match.group(1).strip().strip('"').strip("'")
+    return None

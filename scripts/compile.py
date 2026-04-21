@@ -32,9 +32,36 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 def compile_daily_log(log_path: Path, state: dict) -> None:
-    """Compile a single daily log into knowledge articles via kiro-cli headless."""
-    log_content = log_path.read_text(encoding="utf-8")
+    """Compile a single daily log into knowledge articles via kiro-cli headless.
+
+    Uses byte-offset tracking so repeat compiles of the same file only process
+    content appended since the last successful compilation.
+    """
+    full_content = log_path.read_text(encoding="utf-8")
     wiki_index = read_wiki_index()
+
+    # Determine what's new since last compile
+    ingested = state.get("ingested", {}).get(log_path.name, {})
+    prev_offset = ingested.get("compiled_offset", 0)
+    new_content = full_content[prev_offset:]
+
+    if not new_content.strip():
+        print("  No new content since last compile, skipping.")
+        return
+
+    if prev_offset > 0:
+        print(f"  Partial compile: offset {prev_offset} → {len(full_content)} ({len(new_content)} new chars)")
+    else:
+        print(f"  Full compile: {len(full_content)} chars")
+
+    # If this is a partial compile, give the LLM context about what was already compiled
+    offset_note = ""
+    if prev_offset > 0:
+        offset_note = (
+            f"\n**Note:** This daily log was partially compiled before (first {prev_offset} chars). "
+            f"Only the NEW content below needs processing. The existing articles from earlier "
+            f"compilations are already in the index.\n"
+        )
 
     timestamp = now_iso()
 
@@ -54,14 +81,14 @@ whether to update them or create new ones.
 ## Daily Log to Compile
 
 **File:** {log_path.name}
-
-{log_content}
+{offset_note}
+{new_content}
 
 ## Your Task
 
 1. Read the index above and identify existing articles that overlap with topics in this daily log
 2. Read only those relevant articles from disk (use their file paths under `{KNOWLEDGE_DIR}/`)
-3. Extract 3-7 key concepts into `knowledge/concepts/` articles (update existing or create new)
+3. Extract key concepts into `knowledge/concepts/` articles (update existing or create new)
 4. Create connection articles in `knowledge/connections/` if non-obvious relationships exist
 5. Update `knowledge/index.md` with new/modified entries
 6. Append to `knowledge/log.md`:
@@ -83,10 +110,11 @@ Write all files now."""
         print(f"  Error (exit {result.returncode}): {result.stderr[:500]}")
         return
 
-    # Update state
+    # Update state with hash of full file and byte offset
     state.setdefault("ingested", {})[log_path.name] = {
         "hash": file_hash(log_path),
         "compiled_at": now_iso(),
+        "compiled_offset": len(full_content),
     }
     save_state(state)
 
@@ -115,11 +143,15 @@ def main():
         if args.all:
             to_compile = all_logs
         else:
-            to_compile = [
-                log_path for log_path in all_logs
-                if not state.get("ingested", {}).get(log_path.name)
-                or state["ingested"][log_path.name].get("hash") != file_hash(log_path)
-            ]
+            to_compile = []
+            for log_path in all_logs:
+                entry = state.get("ingested", {}).get(log_path.name)
+                if not entry:
+                    # Never compiled
+                    to_compile.append(log_path)
+                elif entry.get("hash") != file_hash(log_path):
+                    # File changed since last compile (new content appended)
+                    to_compile.append(log_path)
 
     if not to_compile:
         print("Nothing to compile - all daily logs are up to date.")

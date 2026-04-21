@@ -7,8 +7,10 @@ __pycache__/
 scripts/state.json
 scripts/last-flush.json
 scripts/stop-hook-state.json
+scripts/access-log.json
 scripts/flush.log
 scripts/compile.log
+scripts/lint.log
 scripts/stop-flush-*
 
 # Generated content (built up per-user by hooks and scripts)

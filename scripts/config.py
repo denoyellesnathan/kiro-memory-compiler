@@ -18,6 +18,10 @@ AGENTS_FILE = ROOT_DIR / "AGENTS.md"
 INDEX_FILE = KNOWLEDGE_DIR / "index.md"
 LOG_FILE = KNOWLEDGE_DIR / "log.md"
 STATE_FILE = SCRIPTS_DIR / "state.json"
+ACCESS_LOG_FILE = SCRIPTS_DIR / "access-log.json"
+
+# ── Decay / Relevance ─────────────────────────────────────────────────
+STALE_ARTICLE_DAYS = 90  # articles not accessed or updated in this many days
 
 # ── Timezone ───────────────────────────────────────────────────────────
 TIMEZONE = "America/Chicago"
