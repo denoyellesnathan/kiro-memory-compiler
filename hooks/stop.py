@@ -10,6 +10,7 @@ Configured in .kiro/agents/memory-capture.json and memory-compiler.json
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time
@@ -22,6 +23,37 @@ STATE_FILE = SCRIPTS_DIR / "stop-hook-state.json"
 
 FLUSH_INTERVAL_SECONDS = 300  # 5 minutes
 MIN_CONTEXT_CHARS = 500
+
+# Patterns that indicate tool operation narration rather than real conversation
+_TOOL_NOISE_PATTERNS = re.compile(
+    r"(?:"
+    r"Batch fs_read operation|"
+    r"↱ Operation \d+:|"
+    r"✓ Successfully (?:read|wrote|created|deleted)|"
+    r"❗ No (?:files found|matches found)|"
+    r"\d+ operations processed|"
+    r"using tool: (?:read|write|glob|grep|shell)|"
+    r"Reading (?:file|directory):|"
+    r"Searching for (?:files|:)|"
+    r"I will run the following command:|"
+    r"I'll (?:create|modify|append) the following file:|"
+    r"Completed in \d+\.\d+s|"
+    r"Creating:|"
+    r"Updating:|"
+    r"Appending to:|"
+    r"\[K$"
+    r")",
+    re.MULTILINE,
+)
+
+
+def _is_tool_narration(text: str) -> bool:
+    """Return True if the response is dominated by tool operation output."""
+    lines = [l for l in text.splitlines() if l.strip()]
+    if not lines:
+        return True
+    noise_lines = sum(1 for l in lines if _TOOL_NOISE_PATTERNS.search(l))
+    return noise_lines / len(lines) > 0.3
 
 
 def load_state() -> dict:
@@ -55,7 +87,7 @@ def main() -> None:
             state["accumulated_context"] += f"\n**User ({timestamp}):** {prompt}\n"
     elif event_name == "stop":
         response = hook_event.get("assistant_response", "").strip()
-        if response:
+        if response and not _is_tool_narration(response):
             state["accumulated_context"] += f"\n**Assistant ({timestamp}):** {response}\n"
     else:
         return

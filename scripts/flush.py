@@ -71,7 +71,14 @@ def run_flush(context: str) -> str:
     prompt = f"""Review the conversation context below and respond with a concise summary
 of important items to preserve in a daily log.
 
-Format as:
+IMPORTANT: Only extract knowledge from REAL user conversations — things the user learned,
+decided, built, or discussed. REJECT and respond FLUSH_OK if the context is:
+- Tool operation output (file reads, directory listings, grep results, shell commands)
+- Compiler/build session narration (creating articles, updating index, writing files)
+- Repetitive FLUSH_OK entries or empty sessions
+- Raw file contents being read or written by an automated process
+
+Format as exactly:
 
 **Context:** [One line about what the user was working on]
 
