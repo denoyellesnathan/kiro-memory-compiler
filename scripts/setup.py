@@ -35,7 +35,7 @@ def main():
     capture_config = {
         "name": "memory-capture",
         "description": "Silently captures conversation knowledge into daily logs (hooks only, no behavior change)",
-        "prompt": "You are Kiro, an AI assistant. Help the user with whatever they need.",
+        "prompt": f"You are Kiro, an AI assistant. Help the user with whatever they need. Your personal knowledge base is located at {ROOT / 'knowledge'}.",
         "tools": ["*"],
         "allowedTools": ["*"],
         "resources": [f"file://{ROOT / 'knowledge' / 'index.md'}", f"file://{ROOT / 'AGENTS.md'}"],
